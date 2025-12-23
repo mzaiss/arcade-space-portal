@@ -75,6 +75,59 @@
       color: #9fb0cc;
       cursor: not-allowed;
     }
+    #mobileControls {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100%;
+      max-width: 600px;
+      display: none;
+      justify-content: space-between;
+      padding: 0 20px;
+      gap: 20px;
+      pointer-events: auto;
+      z-index: 1000;
+    }
+    @media (max-width: 768px) {
+      #mobileControls {
+        display: flex;
+      }
+    }
+    #mobileShootBtn, #mobileBombBtn {
+      flex: 1;
+      min-height: 60px;
+      font-size: 18px;
+      font-weight: bold;
+      background: #2d6cdf;
+      color: #fff;
+      border: 3px solid #1a5bb8;
+      border-radius: 12px;
+      padding: 15px 20px;
+      cursor: pointer;
+      touch-action: manipulation;
+      user-select: none;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+      transition: all 0.1s;
+    }
+    #mobileShootBtn:active, #mobileBombBtn:active {
+      background: #1a5bb8;
+      transform: scale(0.95);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    }
+    #mobileBombBtn {
+      background: #ff6600;
+      border-color: #cc5200;
+    }
+    #mobileBombBtn:active {
+      background: #cc5200;
+    }
+    #mobileBombBtn:disabled {
+      background: #232a36;
+      border-color: #141821;
+      color: #9fb0cc;
+      opacity: 0.5;
+    }
   </style>
 </head>
 <body>
@@ -98,6 +151,11 @@
   <div id="status">
     <div>Modus: <span id="connStatus">Offline (Tastatur/Lokal)</span></div>
     <div>Neigung: <span id="tiltStatus">Warten...</span></div>
+  </div>
+
+  <div id="mobileControls">
+    <button id="mobileBombBtn">💣 Bombe</button>
+    <button id="mobileShootBtn">🔫 Schießen</button>
   </div>
 
   <script>
@@ -144,6 +202,8 @@
     const connStatus = document.getElementById('connStatus');
     const tiltStatus = document.getElementById('tiltStatus');
     const enableTiltBtn = document.getElementById('enableTilt');
+    const mobileShootBtn = document.getElementById('mobileShootBtn');
+    const mobileBombBtn = document.getElementById('mobileBombBtn');
 
     // Game State
     let level = 1;
@@ -433,20 +493,15 @@
         screenShake.intensity += 1;
     }
     
-    // Continuous shooting while Control is held OR gamepad A button OR touch OR orientation sensor active
+    // Continuous shooting while Control is held OR gamepad A button OR touch OR mobile button
     function updateShooting() {
-        // Auto-shoot when orientation sensor is active (mobile tilt mode)
-        if (localTiltActive) {
-            fireRocket();
-        }
-        
         // Keyboard Control key
         if (keys.ControlLeft || keys.ControlRight) {
             fireRocket();
         }
         
-        // Touch shooting (continuous while touching)
-        if (touchShooting) {
+        // Mobile shoot button (continuous while holding)
+        if (mobileShooting) {
             fireRocket();
         }
         
@@ -471,6 +526,7 @@
             updateShooting(); // Check for continuous shooting
             updateBombReloadBar(); // Update reload bar
             updatePowerUpStatus(); // Update power-up status display
+            updateMobileBombButton(); // Update mobile bomb button state
             update();
         }
         draw();
@@ -1304,39 +1360,6 @@
         updateInput();
     });
 
-    // Touch controls for mobile
-    let touchShooting = false;
-    canvas.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        touchShooting = true;
-        fireRocket();
-    });
-    canvas.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        touchShooting = false;
-    });
-    canvas.addEventListener('touchcancel', (e) => {
-        e.preventDefault();
-        touchShooting = false;
-    });
-    
-    // Long press for bomb (hold for 1 second)
-    let bombTouchTimer = null;
-    canvas.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        bombTouchTimer = setTimeout(() => {
-            fireBomb();
-            bombTouchTimer = null;
-        }, 1000);
-    });
-    canvas.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        if (bombTouchTimer) {
-            clearTimeout(bombTouchTimer);
-            bombTouchTimer = null;
-        }
-    });
-    
     // Prevent scrolling on mobile
     document.addEventListener('touchmove', (e) => {
         if (e.target === canvas) {
@@ -1453,7 +1476,7 @@
         inputX = nx * LOCAL_TILT_SCALE;
         inputY = ny * LOCAL_TILT_SCALE;
 
-        tiltStatus.textContent = `Neigung: x=${nx.toFixed(2)}, y=${ny.toFixed(2)} (Auto-Schießen aktiv)`;
+        tiltStatus.textContent = `Neigung: x=${nx.toFixed(2)}, y=${ny.toFixed(2)}`;
     }
 
     // Check if device orientation is available
@@ -1528,7 +1551,7 @@
         
         localTiltActive = true;
         enableTiltBtn.style.display = 'none';
-        tiltStatus.textContent = "Neigung aktiv - Gerät neigen zum Steuern (Auto-Schießen aktiviert)";
+        tiltStatus.textContent = "Neigung aktiv - Gerät neigen zum Steuern";
         
         // Check after 2 seconds if we're receiving data
         setTimeout(() => {
@@ -1539,6 +1562,59 @@
         }, 2000);
     }
 
+    // Mobile button handlers
+    let mobileShooting = false;
+    
+    mobileShootBtn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        mobileShooting = true;
+        fireRocket();
+    });
+    
+    mobileShootBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        mobileShooting = false;
+    });
+    
+    mobileShootBtn.addEventListener('touchcancel', (e) => {
+        e.preventDefault();
+        mobileShooting = false;
+    });
+    
+    // Also support mouse clicks for testing
+    mobileShootBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        mobileShooting = true;
+        fireRocket();
+    });
+    
+    mobileShootBtn.addEventListener('mouseup', (e) => {
+        e.preventDefault();
+        mobileShooting = false;
+    });
+    
+    mobileShootBtn.addEventListener('mouseleave', (e) => {
+        e.preventDefault();
+        mobileShooting = false;
+    });
+    
+    mobileBombBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        fireBomb();
+    });
+    
+    mobileBombBtn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        fireBomb();
+    });
+
+    // Update bomb button disabled state
+    function updateMobileBombButton() {
+        const now = performance.now();
+        const elapsed = now - lastBombTime;
+        const isReady = elapsed >= BOMB_COOLDOWN;
+        mobileBombBtn.disabled = !isReady;
+    }
 
     // Start
     initGame();
