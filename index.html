@@ -1,0 +1,1547 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Raumschiff Spiel</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #0b0d10;
+      color: #e6eaf2;
+      overflow: hidden; /* Prevent scrolling */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    #gameCanvas {
+      background: #000;
+      border: 2px solid #232a36;
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      max-width: 100%;
+      max-height: 100%;
+    }
+    #ui {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      pointer-events: none;
+    }
+    #bombReload {
+      position: absolute;
+      bottom: 50px;
+      left: 10px;
+      width: 200px;
+      height: 20px;
+      border: 2px solid #232a36;
+      background: #141821;
+      pointer-events: none;
+    }
+    #bombReloadBar {
+      height: 100%;
+      background: #6be675;
+      width: 0%;
+      transition: width 0.1s linear;
+    }
+    #status {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      font-size: 12px;
+      color: #9fb0cc;
+      pointer-events: none;
+    }
+    #controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      pointer-events: auto;
+    }
+    button {
+      background: #2d6cdf;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled {
+      background: #232a36;
+      color: #9fb0cc;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  
+  <div id="ui">
+    <h1 style="margin: 0; font-size: 24px;">Level: <span id="levelDisplay">1</span></h1>
+    <div id="powerUpStatus" style="margin-top: 5px; font-size: 16px; color: #00ff00; display: none;">
+      🔫 Dreifachschuss aktiv!
+    </div>
+  </div>
+
+  <div id="bombReload">
+    <div id="bombReloadBar"></div>
+  </div>
+
+  <div id="controls">
+    <button id="enableTilt">Neigung aktivieren</button>
+  </div>
+
+  <div id="status">
+    <div>Modus: <span id="connStatus">Offline (Tastatur/Lokal)</span></div>
+    <div>Neigung: <span id="tiltStatus">Warten...</span></div>
+  </div>
+
+  <script>
+    // Game Configuration
+    const CANVAS_WIDTH = 800;
+    const CANVAS_HEIGHT = 600;
+    const SHIP_SIZE = 15;
+    const WORMHOLE_SIZE = 30;
+    const BLACK_HOLE_SIZE = 25;
+    const GRAVITY_FORCE = 0.0008; // 3x slower
+    const ACCEL_FACTOR = 0.0125;  // 3x slower
+    const FRICTION = 0.997;       // Less friction
+    const MAX_SPEED = 0.7;        // 3x slower
+    const WALL_BOUNCE = 0.5;
+    const ROCKET_SPEED = 1.7;     // 3x slower
+    const ROCKET_COOLDOWN = 200; // Doubled to halve shooting frequency
+    const WEAPON_DECAY_TIME = 15000; // 15 seconds  
+    const BOMB_SIZE = 40;         // 10x larger than rockets (rockets are ~4px)
+    const BOMB_SPEED = 2.0;       // Slightly faster than rockets
+    const BOMB_COOLDOWN = 5000;    // 5 seconds
+    const MONSTER_SPEED = 0.2;    // 3x slower
+    const MONSTER_SPAWN_RATE_BASE = 6000; // Base spawn rate (6s)
+    const SPECIAL_MONSTER_CHANCE = 0.15; // 15% chance for unicorn/robot
+    const SPECIAL_MONSTER_HP = 50; // Hits needed to kill special monsters (not used, unicorn/robot have 20/10)
+    
+    // Visual Effects
+    const PARTICLE_LIFETIME = 30; // frames
+    let particles = [];
+    let screenShake = { x: 0, y: 0, intensity: 0 };
+    
+    function getMonsterSpawnRate(level) {
+        // Spawn rate decreases (faster spawning) as level increases
+        // Level 1: 6000ms, Level 12: ~1500ms, etc.
+        return Math.max(1500, MONSTER_SPAWN_RATE_BASE - (level - 1) * 400);
+    }
+    const BLACK_HOLE_BASE_SPEED = 0.1; // For moving black holes
+    const REMOTE_TILT_SCALE = 4.0;
+    const LOCAL_TILT_SCALE = 4.0;
+
+    // Elements
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const levelDisplay = document.getElementById('levelDisplay');
+    const connStatus = document.getElementById('connStatus');
+    const tiltStatus = document.getElementById('tiltStatus');
+    const enableTiltBtn = document.getElementById('enableTilt');
+
+    // Game State
+    let level = 1;
+    let ship = {
+        x: 50,
+        y: CANVAS_HEIGHT / 2,
+        vx: 0,
+        vy: 0,
+        angle: 0
+    };
+    let wormhole = { x: 0, y: 0 };
+    let blackHoles = [];
+    let stars = [];
+    let rockets = [];
+    let bombs = [];
+    let monsters = [];
+    let powerUps = [];
+    let lastFireTime = 0;
+    let lastBombTime = 0;
+    let lastMonsterSpawn = 0;
+    let weaponType = 'standard'; // 'standard', 'double', 'triple', 'quadruple', 'five', 'nine'
+    let lastWeaponChangeTime = 0;
+    let gameLoopId = null;
+    let gameState = 'playing'; // 'playing', 'transition'
+    let transitionText = '';
+    let transitionSubText = '';
+
+    // Input State
+    let inputX = 0; // -1 to 1
+    let inputY = 0; // -1 to 1
+    let remoteTiltActive = false;
+    let localTiltActive = false;
+    let gamepadIndex = null;
+
+    // Initialization
+    function initGame() {
+        resetLevel();
+        initStars();
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        window.addEventListener("gamepadconnected", (e) => {
+            console.log("Gamepad connected at index %d: %s. %d buttons, %d axes.",
+                e.gamepad.index, e.gamepad.id,
+                e.gamepad.buttons.length, e.gamepad.axes.length);
+            gamepadIndex = e.gamepad.index;
+            connStatus.textContent = "Controller verbunden";
+        });
+        window.addEventListener("gamepaddisconnected", (e) => {
+            console.log("Gamepad disconnected from index %d: %s",
+                e.gamepad.index, e.gamepad.id);
+            if (gamepadIndex === e.gamepad.index) {
+                gamepadIndex = null;
+                connStatus.textContent = "Controller getrennt";
+            }
+        });
+
+        requestAnimationFrame(gameLoop);
+        
+        // Check orientation sensor support
+        checkOrientationSupport();
+        
+        // Try connecting remote tilt only if NOT on file protocol
+        if (window.location.protocol !== 'file:') {
+            startRemoteTilt();
+        } else {
+            connStatus.textContent = "Offline (File Mode)";
+        }
+    }
+
+    function initStars() {
+        stars = [];
+        for (let i = 0; i < 200; i++) {
+            stars.push({
+                x: Math.random() * CANVAS_WIDTH,
+                y: Math.random() * CANVAS_HEIGHT,
+                size: Math.random() * 2,
+                alpha: Math.random(),
+                twinkleSpeed: Math.random() * 0.05 + 0.01
+            });
+        }
+    }
+
+    function resizeCanvas() {
+        // Keep aspect ratio but scale to fit window
+        const scale = Math.min(window.innerWidth / CANVAS_WIDTH, window.innerHeight / CANVAS_HEIGHT);
+        canvas.style.width = `${CANVAS_WIDTH * scale}px`;
+        canvas.style.height = `${CANVAS_HEIGHT * scale}px`;
+    }
+
+    function getLevelGroup(level) {
+        // Groups: 1-3, 4-6, 7-9, 10-12, then repeats
+        const groupNum = Math.floor((level - 1) / 3) % 4;
+        return groupNum; // 0, 1, 2, 3
+    }
+
+    function getBlackHoleCount(level) {
+        const group = getLevelGroup(level);
+        if (group === 0) return 5;      // Levels 1-3
+        if (group === 1) return 8;     // Levels 4-6
+        if (group === 2) return 5;      // Levels 7-9
+        return 8;                        // Levels 10-12
+    }
+
+    function shouldBlackHolesMove(level) {
+        return true; // Always move, from level 1
+    }
+
+    function getBlackHoleSpeed(level) {
+        // Speed scales proportionally with level
+        // Level 1: 0.05, Level 2: 0.10, Level 3: 0.15, etc.
+        return BLACK_HOLE_BASE_SPEED * level * 0.5;
+    }
+
+    function resetLevel() {
+        // Reset Ship
+        ship.x = 50;
+        ship.y = CANVAS_HEIGHT / 2;
+        ship.vx = 0;
+        ship.vy = 0;
+        ship.angle = 0;
+        
+        rockets = []; // Clear rockets on reset
+        bombs = []; // Clear bombs on reset
+        monsters = []; // Clear monsters on reset
+        powerUps = []; // Clear power-ups on reset
+        // weaponType persists across levels - only reset on game over
+
+        // Reset Input (optional, but good for safety)
+        // inputX = 0; inputY = 0; 
+
+        // Place Wormhole (Right side)
+        wormhole = {
+            x: CANVAS_WIDTH - 60,
+            y: Math.random() * (CANVAS_HEIGHT - 2 * WORMHOLE_SIZE) + WORMHOLE_SIZE
+        };
+
+        // Place Black Holes
+        blackHoles = [];
+        const bhCount = getBlackHoleCount(level);
+        const bhSpeed = getBlackHoleSpeed(level);
+        
+        for (let i = 0; i < bhCount; i++) {
+            let bh;
+            let safe = false;
+            while (!safe) {
+                bh = {
+                    x: Math.random() * (CANVAS_WIDTH - 200) + 100,
+                    y: Math.random() * (CANVAS_HEIGHT - 2 * BLACK_HOLE_SIZE) + BLACK_HOLE_SIZE,
+                    vx: 0,
+                    vy: 0
+                };
+                
+                // Initialize velocity direction (always moving now, speed scales with level)
+                const angle = Math.random() * Math.PI * 2;
+                const speed = bhSpeed; // Speed scales with level
+                bh.vx = Math.cos(angle) * speed;
+                bh.vy = Math.sin(angle) * speed;
+                
+                const dx = bh.x - ship.x;
+                const dy = bh.y - ship.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                const wx = bh.x - wormhole.x;
+                const wy = bh.y - wormhole.y;
+                const wDist = Math.sqrt(wx*wx + wy*wy);
+
+                if (dist > 150 && wDist > 80) {
+                    safe = true;
+                }
+            }
+            blackHoles.push(bh);
+        }
+
+        levelDisplay.textContent = level;
+    }
+
+    // Game Loop
+    function fireRocket() {
+        const now = performance.now();
+        if (now - lastFireTime < ROCKET_COOLDOWN) return;
+        lastFireTime = now;
+
+        let angles = [];
+        let particleCount = 3;
+
+        switch(weaponType) {
+            case 'double':
+                // Fire 2 rockets at -5, +5 degrees
+                angles = [
+                    ship.angle - (5 * Math.PI / 180),
+                    ship.angle + (5 * Math.PI / 180)
+                ];
+                particleCount = 5;
+                break;
+            case 'triple':
+                // Fire 3 rockets at -20, 0, +20 degrees
+                angles = [
+                    ship.angle - (20 * Math.PI / 180),
+                    ship.angle,
+                    ship.angle + (20 * Math.PI / 180)
+                ];
+                particleCount = 8;
+                break;
+            case 'quadruple':
+                // Fire 4 rockets at -15, -5, +5, +15 degrees
+                angles = [
+                    ship.angle - (15 * Math.PI / 180),
+                    ship.angle - (5 * Math.PI / 180),
+                    ship.angle + (5 * Math.PI / 180),
+                    ship.angle + (15 * Math.PI / 180)
+                ];
+                particleCount = 10;
+                break;
+            case 'five':
+                // Fire 5 rockets at -30, -15, 0, +15, +30 degrees
+                angles = [
+                    ship.angle - (30 * Math.PI / 180),
+                    ship.angle - (15 * Math.PI / 180),
+                    ship.angle,
+                    ship.angle + (15 * Math.PI / 180),
+                    ship.angle + (30 * Math.PI / 180)
+                ];
+                particleCount = 12;
+                break;
+            case 'nine':
+                // Fire 9 rockets in all directions (every 40 degrees)
+                angles = [];
+                for (let i = 0; i < 9; i++) {
+                    angles.push(ship.angle + (i - 4) * (40 * Math.PI / 180));
+                }
+                particleCount = 15;
+                break;
+            case 'standard':
+            default:
+                // Single rocket
+                angles = [ship.angle];
+                particleCount = 3;
+                break;
+        }
+        
+        for (const angle of angles) {
+            rockets.push({
+                x: ship.x,
+                y: ship.y,
+                vx: Math.cos(angle) * ROCKET_SPEED,
+                vy: Math.sin(angle) * ROCKET_SPEED,
+                life: 240,
+                trail: []
+            });
+        }
+        
+        // Muzzle flash
+        createExplosion(ship.x, ship.y, '#ff3333', particleCount);
+    }
+
+    function createExplosion(x, y, color, count) {
+        for (let i = 0; i < count; i++) {
+            const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+            const speed = 2 + Math.random() * 2;
+            particles.push({
+                x: x,
+                y: y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                life: PARTICLE_LIFETIME,
+                color: color,
+                size: 2 + Math.random() * 3
+            });
+        }
+    }
+
+    function fireBomb() {
+        const now = performance.now();
+        if (now - lastBombTime < BOMB_COOLDOWN) return;
+        lastBombTime = now;
+
+        bombs.push({
+            x: ship.x,
+            y: ship.y,
+            vx: Math.cos(ship.angle) * BOMB_SPEED,
+            vy: Math.sin(ship.angle) * BOMB_SPEED,
+            size: BOMB_SIZE
+        });
+        
+        // Launch effect
+        createExplosion(ship.x, ship.y, '#ff6600', 8);
+        screenShake.intensity += 1;
+    }
+    
+    // Continuous shooting while Control is held OR gamepad A button OR touch OR orientation sensor active
+    function updateShooting() {
+        // Auto-shoot when orientation sensor is active (mobile tilt mode)
+        if (localTiltActive) {
+            fireRocket();
+        }
+        
+        // Keyboard Control key
+        if (keys.ControlLeft || keys.ControlRight) {
+            fireRocket();
+        }
+        
+        // Touch shooting (continuous while touching)
+        if (touchShooting) {
+            fireRocket();
+        }
+        
+        // Gamepad A button (Button 0) - check here for continuous shooting
+        // Gamepad B button (Button 1) - bomb
+        if (gamepadIndex !== null) {
+            const gp = navigator.getGamepads()[gamepadIndex];
+            if (gp) {
+                if (gp.buttons[0].pressed) {
+                    fireRocket();
+                }
+                if (gp.buttons[1].pressed) {
+                    fireBomb();
+                }
+            }
+        }
+    }
+
+    function gameLoop() {
+        if (gameState === 'playing') {
+            updateInput();
+            updateShooting(); // Check for continuous shooting
+            updateBombReloadBar(); // Update reload bar
+            updatePowerUpStatus(); // Update power-up status display
+            update();
+        }
+        draw();
+        gameLoopId = requestAnimationFrame(gameLoop);
+    }
+
+    function updateBombReloadBar() {
+        const bombReloadBar = document.getElementById('bombReloadBar');
+        if (!bombReloadBar) return;
+        
+        const now = performance.now();
+        const elapsed = now - lastBombTime;
+        const percent = Math.min(100, (elapsed / BOMB_COOLDOWN) * 100);
+        bombReloadBar.style.width = percent + '%';
+    }
+
+    function updatePowerUpStatus() {
+        const powerUpStatus = document.getElementById('powerUpStatus');
+        if (powerUpStatus) {
+            if (weaponType === 'standard') {
+                powerUpStatus.style.display = 'none';
+            } else {
+                const weaponNames = {
+                    'double': 'Doppelschuss',
+                    'triple': 'Dreifachschuss',
+                    'quadruple': 'Vierfachschuss',
+                    'five': 'Fünfschuss',
+                    'nine': 'Neunschuss'
+                };
+                const now = performance.now();
+                const timeLeft = Math.max(0, WEAPON_DECAY_TIME - (now - lastWeaponChangeTime));
+                const secondsLeft = Math.ceil(timeLeft / 1000);
+                powerUpStatus.textContent = `🔫 ${weaponNames[weaponType]} aktiv! (${secondsLeft}s)`;
+                powerUpStatus.style.display = 'block';
+            }
+        }
+    }
+
+    function update() {
+        // Spawn Monsters (rate scales with level)
+        const now = performance.now();
+        const spawnRate = getMonsterSpawnRate(level);
+        if (now - lastMonsterSpawn > spawnRate && blackHoles.length > 0) {
+            spawnMonster();
+            lastMonsterSpawn = now;
+        }
+
+        // Apply Input to Velocity
+        ship.vx += inputX * ACCEL_FACTOR;
+        ship.vy += inputY * ACCEL_FACTOR;
+
+        // Apply Black Hole Gravity (Constant Force)
+        for (const bh of blackHoles) {
+            const dx = bh.x - ship.x;
+            const dy = bh.y - ship.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            // Avoid singularity/division by zero, though constant force doesn't strictly need it, 
+            // we just need direction.
+            if (dist > 0) {
+                // Normalized direction vector (dx/dist, dy/dist) multiplied by force
+                ship.vx += (dx / dist) * GRAVITY_FORCE;
+                ship.vy += (dy / dist) * GRAVITY_FORCE;
+            }
+        }
+
+        // Friction
+        ship.vx *= FRICTION;
+        ship.vy *= FRICTION;
+
+        // Cap Velocity
+        const speed = Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy);
+        if (speed > MAX_SPEED) {
+            ship.vx = (ship.vx / speed) * MAX_SPEED;
+            ship.vy = (ship.vy / speed) * MAX_SPEED;
+        }
+
+        // Position Update
+        ship.x += ship.vx;
+        ship.y += ship.vy;
+
+        // Move Monsters
+        for (const m of monsters) {
+            const dx = ship.x - m.x;
+            const dy = ship.y - m.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist > 0) {
+                m.x += (dx / dist) * MONSTER_SPEED;
+                m.y += (dy / dist) * MONSTER_SPEED;
+            }
+        }
+
+        // Move Black Holes (always moving now, speed scales with level)
+        for (const bh of blackHoles) {
+            bh.x += bh.vx;
+            bh.y += bh.vy;
+            
+            // Bounce off walls
+            if (bh.x < BLACK_HOLE_SIZE) { bh.x = BLACK_HOLE_SIZE; bh.vx = -bh.vx; }
+            if (bh.x > CANVAS_WIDTH - BLACK_HOLE_SIZE) { bh.x = CANVAS_WIDTH - BLACK_HOLE_SIZE; bh.vx = -bh.vx; }
+            if (bh.y < BLACK_HOLE_SIZE) { bh.y = BLACK_HOLE_SIZE; bh.vy = -bh.vy; }
+            if (bh.y > CANVAS_HEIGHT - BLACK_HOLE_SIZE) { bh.y = CANVAS_HEIGHT - BLACK_HOLE_SIZE; bh.vy = -bh.vy; }
+        }
+
+        // Update Bombs
+        for (let i = bombs.length - 1; i >= 0; i--) {
+            const b = bombs[i];
+            b.x += b.vx;
+            b.y += b.vy;
+            // Add trail particles
+            if (Math.random() < 0.3) {
+                particles.push({
+                    x: b.x,
+                    y: b.y,
+                    vx: (Math.random() - 0.5) * 0.5,
+                    vy: (Math.random() - 0.5) * 0.5,
+                    life: PARTICLE_LIFETIME,
+                    color: Math.random() > 0.5 ? '#ff6600' : '#ffff00',
+                    size: 3
+                });
+            }
+            // Remove if off screen
+            if (b.x < -BOMB_SIZE || b.x > CANVAS_WIDTH + BOMB_SIZE || 
+                b.y < -BOMB_SIZE || b.y > CANVAS_HEIGHT + BOMB_SIZE) {
+                bombs.splice(i, 1);
+            }
+        }
+
+        // Update Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+            p.vx *= 0.98; // Friction
+            p.vy *= 0.98;
+            if (p.life <= 0) {
+                particles.splice(i, 1);
+            }
+        }
+
+        // Update Power-ups (float animation)
+        for (const pu of powerUps) {
+            pu.floatOffset += 0.1;
+            pu.y += Math.sin(pu.floatOffset) * 0.2;
+        }
+
+        // Update Screen Shake
+        screenShake.intensity *= 0.9; // Decay
+        screenShake.x = (Math.random() - 0.5) * screenShake.intensity;
+        screenShake.y = (Math.random() - 0.5) * screenShake.intensity;
+
+        // Wall Collisions
+        if (ship.x < SHIP_SIZE) { ship.x = SHIP_SIZE; ship.vx *= -WALL_BOUNCE; }
+        if (ship.x > CANVAS_WIDTH - SHIP_SIZE) { ship.x = CANVAS_WIDTH - SHIP_SIZE; ship.vx *= -WALL_BOUNCE; }
+        if (ship.y < SHIP_SIZE) { ship.y = SHIP_SIZE; ship.vy *= -WALL_BOUNCE; }
+        if (ship.y > CANVAS_HEIGHT - SHIP_SIZE) { ship.y = CANVAS_HEIGHT - SHIP_SIZE; ship.vy *= -WALL_BOUNCE; }
+
+        // Rotate ship based on velocity
+        if (Math.abs(ship.vx) > 0.1 || Math.abs(ship.vy) > 0.1) {
+            ship.angle = Math.atan2(ship.vy, ship.vx);
+        }
+
+        // Update Rockets
+        for (let i = rockets.length - 1; i >= 0; i--) {
+            const r = rockets[i];
+            r.x += r.vx;
+            r.y += r.vy;
+            r.life--;
+            
+            // Add trail particles
+            if (Math.random() < 0.5) {
+                particles.push({
+                    x: r.x,
+                    y: r.y,
+                    vx: (Math.random() - 0.5) * 0.3,
+                    vy: (Math.random() - 0.5) * 0.3,
+                    life: 15,
+                    color: '#ff3333',
+                    size: 2
+                });
+            }
+            
+            if (r.life <= 0 || r.x < 0 || r.x > CANVAS_WIDTH || r.y < 0 || r.y > CANVAS_HEIGHT) {
+                if (r.life <= 0) {
+                    createExplosion(r.x, r.y, '#ff3333', 5);
+                }
+                rockets.splice(i, 1);
+            }
+        }
+
+        // Check Collisions
+        checkCollisions();
+    }
+
+    function spawnMonster() {
+        // Pick random black hole
+        const bh = blackHoles[Math.floor(Math.random() * blackHoles.length)];
+        
+        // Decide if special monster (unicorn/robot) or normal (jellyfish/octopus)
+        const isSpecial = Math.random() < SPECIAL_MONSTER_CHANCE;
+        let type, hp;
+        
+        if (isSpecial) {
+            // Special monsters: unicorn or robot
+            const isUnicorn = Math.random() > 0.5;
+            type = isUnicorn ? '🦄' : '🤖';
+            hp = isUnicorn ? 20 : 10; // Unicorn: 20 HP, Robot: 10 HP
+        } else {
+            // Normal monsters: jellyfish or octopus
+            type = Math.random() > 0.5 ? '🐙' : '🪼';
+            hp = 1;
+        }
+        
+        monsters.push({
+            x: bh.x,
+            y: bh.y,
+            type: type,
+            size: 20,
+            hp: hp,
+            maxHp: hp
+        });
+    }
+
+    function checkCollisions() {
+        // 0. Bomb vs Everything (kills everything in path)
+        for (let i = bombs.length - 1; i >= 0; i--) {
+            const b = bombs[i];
+            
+            // Bomb vs Black Holes
+            for (let j = blackHoles.length - 1; j >= 0; j--) {
+                const bh = blackHoles[j];
+                const dx = b.x - bh.x;
+                const dy = b.y - bh.y;
+                if (Math.sqrt(dx*dx + dy*dy) < BOMB_SIZE/2 + BLACK_HOLE_SIZE) {
+                    createExplosion(bh.x, bh.y, '#ff00ff', 20);
+                    screenShake.intensity += 3;
+                    blackHoles.splice(j, 1);
+                }
+            }
+            
+            // Bomb vs Monsters
+            for (let k = monsters.length - 1; k >= 0; k--) {
+                const m = monsters[k];
+                const dx = b.x - m.x;
+                const dy = b.y - m.y;
+                if (Math.sqrt(dx*dx + dy*dy) < BOMB_SIZE/2 + m.size) {
+                    createExplosion(m.x, m.y, '#00ffff', 15);
+                    screenShake.intensity += 2;
+                    
+                    // All enemies drop power-ups (20% chance for nothing)
+                    if (Math.random() > 0.2) {
+                        const rand = Math.random();
+                        let powerUpType, weaponTypeValue;
+                        
+                        if (rand < 0.16) {
+                            // 16% - Double shooter
+                            powerUpType = '2️⃣';
+                            weaponTypeValue = 'double';
+                        } else if (rand < 0.32) {
+                            // 16% - Triple shooter
+                            powerUpType = '3️⃣';
+                            weaponTypeValue = 'triple';
+                        } else if (rand < 0.48) {
+                            // 16% - Quadruple shooter
+                            powerUpType = '4️⃣';
+                            weaponTypeValue = 'quadruple';
+                        } else if (rand < 0.64) {
+                            // 16% - Five shooter
+                            powerUpType = '5️⃣';
+                            weaponTypeValue = 'five';
+                        } else if (rand < 0.8) {
+                            // 16% - Nine shooter (all directions)
+                            powerUpType = '9️⃣';
+                            weaponTypeValue = 'nine';
+                        } else {
+                            // 20% - Nothing (no drop)
+                            powerUpType = null;
+                        }
+                        
+                        if (powerUpType) {
+                            powerUps.push({
+                                x: m.x,
+                                y: m.y,
+                                type: powerUpType,
+                                weaponType: weaponTypeValue,
+                                size: 20,
+                                floatOffset: Math.random() * Math.PI * 2
+                            });
+                        }
+                    }
+                    
+                    monsters.splice(k, 1);
+                }
+            }
+        }
+
+        // 1. Rocket vs Black Holes & Monsters
+        for (let i = rockets.length - 1; i >= 0; i--) {
+            const r = rockets[i];
+            let rocketHit = false;
+            
+            // Check Black Holes
+            for (let j = blackHoles.length - 1; j >= 0; j--) {
+                const bh = blackHoles[j];
+                const dx = r.x - bh.x;
+                const dy = r.y - bh.y;
+                if (Math.sqrt(dx*dx + dy*dy) < BLACK_HOLE_SIZE + 5) {
+                    createExplosion(bh.x, bh.y, '#ff00ff', 12);
+                    screenShake.intensity += 2;
+                    blackHoles.splice(j, 1);
+                    rocketHit = true;
+                    break; 
+                }
+            }
+            
+            // Check Monsters (if not already hit black hole)
+            if (!rocketHit) {
+                for (let k = monsters.length - 1; k >= 0; k--) {
+                    const m = monsters[k];
+                    const dx = r.x - m.x;
+                    const dy = r.y - m.y;
+                    if (Math.sqrt(dx*dx + dy*dy) < m.size + 5) {
+                        // Reduce HP instead of instant kill
+                        m.hp--;
+                        if (m.hp <= 0) {
+                            createExplosion(m.x, m.y, '#00ffff', 10);
+                            screenShake.intensity += 1.5;
+                            
+                            // All enemies drop power-ups (20% chance for nothing)
+                            if (Math.random() > 0.2) {
+                                const rand = Math.random();
+                                let powerUpType, weaponTypeValue;
+                                
+                                if (rand < 0.16) {
+                                    // 16% - Double shooter
+                                    powerUpType = '2️⃣';
+                                    weaponTypeValue = 'double';
+                                } else if (rand < 0.32) {
+                                    // 16% - Triple shooter
+                                    powerUpType = '3️⃣';
+                                    weaponTypeValue = 'triple';
+                                } else if (rand < 0.48) {
+                                    // 16% - Quadruple shooter
+                                    powerUpType = '4️⃣';
+                                    weaponTypeValue = 'quadruple';
+                                } else if (rand < 0.64) {
+                                    // 16% - Five shooter
+                                    powerUpType = '5️⃣';
+                                    weaponTypeValue = 'five';
+                                } else if (rand < 0.8) {
+                                    // 16% - Nine shooter (all directions)
+                                    powerUpType = '9️⃣';
+                                    weaponTypeValue = 'nine';
+                                } else {
+                                    // 20% - Nothing (no drop)
+                                    powerUpType = null;
+                                }
+                                
+                                if (powerUpType) {
+                                    powerUps.push({
+                                        x: m.x,
+                                        y: m.y,
+                                        type: powerUpType,
+                                        weaponType: weaponTypeValue,
+                                        size: 20,
+                                        floatOffset: Math.random() * Math.PI * 2
+                                    });
+                                }
+                            }
+                            
+                            monsters.splice(k, 1);
+                        } else {
+                            // Small hit effect
+                            createExplosion(m.x, m.y, '#ffff00', 5);
+                        }
+                        rocketHit = true;
+                        break;
+                    }
+                }
+            }
+
+            if (rocketHit) rockets.splice(i, 1);
+        }
+
+        // 1. Black Holes (Circle Collision)
+        for (const bh of blackHoles) {
+            const dx = ship.x - bh.x;
+            const dy = ship.y - bh.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < SHIP_SIZE + BLACK_HOLE_SIZE - 5) { 
+                startGameOver();
+                return;
+            }
+        }
+
+        // 2. Monsters vs Ship
+        for (const m of monsters) {
+            const dx = ship.x - m.x;
+            const dy = ship.y - m.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < SHIP_SIZE + m.size - 5) {
+                startGameOver();
+                return;
+            }
+        }
+
+        // 3. Power-ups vs Ship
+        for (let i = powerUps.length - 1; i >= 0; i--) {
+            const pu = powerUps[i];
+            const dx = ship.x - pu.x;
+            const dy = ship.y - pu.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < SHIP_SIZE + pu.size) {
+                // Collect power-up
+                weaponType = pu.weaponType || 'standard';
+                lastWeaponChangeTime = performance.now(); // Reset decay timer
+                createExplosion(pu.x, pu.y, '#00ff00', 15);
+                screenShake.intensity += 1;
+                powerUps.splice(i, 1);
+            }
+        }
+
+        // 4. Wormhole (Goal or Death)
+        const wx = ship.x - wormhole.x;
+        const wy = ship.y - wormhole.y;
+        const wDist = Math.sqrt(wx*wx + wy*wy);
+        if (wDist < SHIP_SIZE + WORMHOLE_SIZE - 10) {
+            // Check if all monsters are dead
+            if (monsters.length === 0) {
+                // Blue/Active: Complete level
+                startLevelTransition();
+            } else {
+                // Red/Deadly: Game Over
+                startGameOver();
+            }
+        }
+    }
+
+    function startGameOver() {
+        gameState = 'gameover';
+        transitionText = "VERSCHLUCKT!";
+        transitionSubText = "Neustart bei Level 1...";
+        
+        // Reset weapon type on game over
+        weaponType = 'standard';
+        lastWeaponChangeTime = 0;
+        
+        setTimeout(() => { 
+            gameState = 'playing';
+            level = 1;
+            resetLevel();
+        }, 3000);
+    }
+
+    function startLevelTransition() {
+        gameState = 'transition';
+        transitionText = `Level ${level} geschafft!`;
+        transitionSubText = "Bereit für nächstes Level...";
+        
+        // Simple timeline for transition (half the time)
+        setTimeout(() => { transitionSubText = "3"; }, 500);
+        setTimeout(() => { transitionSubText = "2"; }, 1000);
+        setTimeout(() => { transitionSubText = "1"; }, 1500);
+        setTimeout(() => { 
+            gameState = 'playing';
+            level++;
+            resetLevel();
+        }, 2000);
+    }
+
+    function draw() {
+        // Apply screen shake offset
+        ctx.save();
+        ctx.translate(screenShake.x, screenShake.y);
+        
+        // Clear Background
+        ctx.fillStyle = '#0b0d10';
+        ctx.fillRect(-screenShake.x, -screenShake.y, CANVAS_WIDTH + 20, CANVAS_HEIGHT + 20);
+
+        // Draw Glitter/Stars with enhanced twinkling
+        for (const star of stars) {
+            star.alpha += star.twinkleSpeed;
+            if (star.alpha > 1 || star.alpha < 0.2) star.twinkleSpeed *= -1;
+            
+            const alpha = Math.abs(star.alpha);
+            // Add glow to stars
+            ctx.shadowBlur = 3;
+            ctx.shadowColor = `rgba(255, 255, 255, ${alpha})`;
+            ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+            ctx.fillRect(star.x, star.y, star.size, star.size);
+            ctx.shadowBlur = 0;
+        }
+
+        // Draw Particles (before other objects for depth)
+        for (const p of particles) {
+            const alpha = p.life / PARTICLE_LIFETIME;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1.0;
+
+        // Draw Bombs with glow effect
+        for (const b of bombs) {
+            // Outer glow
+            const gradient = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, BOMB_SIZE/2);
+            gradient.addColorStop(0, 'rgba(255, 102, 0, 1)');
+            gradient.addColorStop(0.5, 'rgba(255, 51, 51, 0.8)');
+            gradient.addColorStop(1, 'rgba(255, 102, 0, 0)');
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, BOMB_SIZE/2, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Core
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, BOMB_SIZE/3, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffff00';
+            ctx.fill();
+            ctx.strokeStyle = '#ff3333';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        // Draw Rockets with glow
+        for (const r of rockets) {
+            // Glow
+            const gradient = ctx.createRadialGradient(r.x, r.y, 0, r.x, r.y, 8);
+            gradient.addColorStop(0, 'rgba(255, 51, 51, 1)');
+            gradient.addColorStop(0.5, 'rgba(255, 102, 0, 0.6)');
+            gradient.addColorStop(1, 'rgba(255, 51, 51, 0)');
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(r.x, r.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Core
+            ctx.fillStyle = '#ff3333';
+            ctx.beginPath();
+            ctx.arc(r.x, r.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Draw Power-ups
+        ctx.font = '24px system-ui, Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const pu of powerUps) {
+            // Power-up glow (different colors for different types)
+            ctx.shadowBlur = 15;
+            const glowColors = {
+                '2️⃣': '#00ffff',  // Cyan for double
+                '3️⃣': '#ff00ff',  // Magenta for triple
+                '4️⃣': '#ffff00',  // Yellow for quadruple
+                '5️⃣': '#ff6600',  // Orange for five
+                '9️⃣': '#ff00ff'   // Bright magenta for nine
+            };
+            ctx.shadowColor = glowColors[pu.type] || '#ffffff';
+            ctx.fillText(pu.type, pu.x, pu.y);
+            ctx.shadowBlur = 0;
+            
+            // Pulsing ring effect
+            const pulse = Math.sin(pu.floatOffset * 2) * 0.3 + 0.7;
+            ctx.beginPath();
+            ctx.arc(pu.x, pu.y, pu.size, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 255, 0, ${0.5 * pulse})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        // Draw Monsters
+        ctx.font = '24px system-ui, Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (const m of monsters) {
+            // Monster glow
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = m.maxHp > 1 ? '#ff00ff' : '#00ffff';
+            ctx.fillText(m.type, m.x, m.y);
+            ctx.shadowBlur = 0;
+            
+            // Draw HP bar for special monsters (unicorn/robot)
+            if (m.maxHp > 1) {
+                const barWidth = 30;
+                const barHeight = 4;
+                const hpPercent = m.hp / m.maxHp;
+                
+                // Background bar with glow
+                ctx.fillStyle = 'rgba(100, 0, 0, 0.7)';
+                ctx.fillRect(m.x - barWidth/2, m.y + 18, barWidth, barHeight);
+                
+                // HP bar with gradient
+                const hpGradient = ctx.createLinearGradient(m.x - barWidth/2, 0, m.x + barWidth/2, 0);
+                if (hpPercent > 0.5) {
+                    hpGradient.addColorStop(0, '#6be675');
+                    hpGradient.addColorStop(1, '#4dd65c');
+                } else if (hpPercent > 0.25) {
+                    hpGradient.addColorStop(0, '#ffb86b');
+                    hpGradient.addColorStop(1, '#ff9f40');
+                } else {
+                    hpGradient.addColorStop(0, '#ff4040');
+                    hpGradient.addColorStop(1, '#cc0000');
+                }
+                ctx.fillStyle = hpGradient;
+                ctx.fillRect(m.x - barWidth/2, m.y + 18, barWidth * hpPercent, barHeight);
+            }
+        }
+
+        // Draw Black Holes with animated glow
+        const blackHoleTime = performance.now() / 1000;
+        for (const bh of blackHoles) {
+            // Animated outer glow
+            const pulse = Math.sin(blackHoleTime * 2 + bh.x * 0.1) * 0.3 + 0.7;
+            const gradient = ctx.createRadialGradient(bh.x, bh.y, 0, bh.x, bh.y, BLACK_HOLE_SIZE * 1.5);
+            gradient.addColorStop(0, 'rgba(0, 0, 0, 1)');
+            gradient.addColorStop(0.7, 'rgba(50, 0, 50, 0.8)');
+            gradient.addColorStop(1, `rgba(100, 0, 100, ${0.3 * pulse})`);
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(bh.x, bh.y, BLACK_HOLE_SIZE * 1.5, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Core
+            ctx.beginPath();
+            ctx.arc(bh.x, bh.y, BLACK_HOLE_SIZE, 0, Math.PI * 2);
+            ctx.fillStyle = '#000';
+            ctx.fill();
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // Event horizon ring
+            ctx.beginPath();
+            ctx.arc(bh.x, bh.y, BLACK_HOLE_SIZE + 2, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(100, 0, 100, ${0.5 * pulse})`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        // Draw Wormhole (Red if monsters exist, Blue if all cleared) with enhanced visuals
+        const isActive = monsters.length === 0;
+        const wormholeTime = performance.now() / 1000;
+        
+        ctx.save();
+        ctx.translate(wormhole.x, wormhole.y);
+        
+        // Outer glow
+        const glowGradient = ctx.createRadialGradient(0, 0, 0, 0, 0, WORMHOLE_SIZE * 1.5);
+        if (isActive) {
+            glowGradient.addColorStop(0, 'rgba(0, 255, 255, 0.8)');
+            glowGradient.addColorStop(0.5, 'rgba(0, 200, 255, 0.4)');
+            glowGradient.addColorStop(1, 'rgba(0, 255, 255, 0)');
+        } else {
+            glowGradient.addColorStop(0, 'rgba(255, 64, 64, 0.8)');
+            glowGradient.addColorStop(0.5, 'rgba(200, 0, 0, 0.4)');
+            glowGradient.addColorStop(1, 'rgba(255, 64, 64, 0)');
+        }
+        ctx.fillStyle = glowGradient;
+        ctx.beginPath();
+        ctx.arc(0, 0, WORMHOLE_SIZE * 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Core
+        ctx.beginPath();
+        ctx.arc(0, 0, WORMHOLE_SIZE, 0, Math.PI * 2);
+        ctx.fillStyle = isActive ? '#1a0b2e' : '#2e0b0b';
+        ctx.fill();
+        ctx.strokeStyle = isActive ? '#00ffff' : '#ff4040';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        
+        // Animated swirl
+        if (gameState === 'transition') {
+            ctx.rotate(wormholeTime * 5); // Spin faster
+            const scale = 1 + Math.sin(wormholeTime * 10) * 0.2; // Pulse
+            ctx.scale(scale, scale);
+        } else {
+            ctx.rotate(wormholeTime * 2);
+        }
+
+        // Swirl lines
+        for (let i = 0; i < 4; i++) {
+            ctx.save();
+            ctx.rotate((Math.PI / 2) * i);
+            ctx.beginPath();
+            ctx.moveTo(-WORMHOLE_SIZE + 5, 0);
+            ctx.lineTo(WORMHOLE_SIZE - 5, 0);
+            ctx.strokeStyle = isActive 
+                ? `rgba(0, 255, 255, ${0.6 + Math.sin(wormholeTime + i) * 0.2})`
+                : `rgba(255, 64, 64, ${0.6 + Math.sin(wormholeTime + i) * 0.2})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.restore();
+        }
+        
+        // Pulsing inner ring
+        ctx.beginPath();
+        ctx.arc(0, 0, WORMHOLE_SIZE * 0.7, 0, Math.PI * 2);
+        ctx.strokeStyle = isActive 
+            ? `rgba(0, 255, 255, ${0.3 + Math.abs(Math.sin(wormholeTime * 2)) * 0.4})`
+            : `rgba(255, 64, 64, ${0.3 + Math.abs(Math.sin(wormholeTime * 2)) * 0.4})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.restore();
+
+
+    // Draw Ship with enhanced visuals
+    if (gameState === 'playing') {
+        ctx.save();
+        ctx.translate(ship.x, ship.y);
+        ctx.rotate(ship.angle);
+        
+        // Engine flame with particles
+        if (Math.abs(ship.vx) > 0.1 || Math.abs(ship.vy) > 0.1) {
+            const flameLength = 8 + Math.random() * 4;
+            const gradient = ctx.createLinearGradient(-SHIP_SIZE/2, 0, -SHIP_SIZE - flameLength, 0);
+            gradient.addColorStop(0, 'rgba(255, 102, 0, 1)');
+            gradient.addColorStop(0.5, 'rgba(255, 200, 0, 0.8)');
+            gradient.addColorStop(1, 'rgba(255, 102, 0, 0)');
+            ctx.strokeStyle = gradient;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(-SHIP_SIZE/2, 0);
+            ctx.lineTo(-SHIP_SIZE - flameLength, 0);
+            ctx.stroke();
+            
+            // Add engine particles occasionally
+            if (Math.random() < 0.2) {
+                particles.push({
+                    x: ship.x - Math.cos(ship.angle) * SHIP_SIZE,
+                    y: ship.y - Math.sin(ship.angle) * SHIP_SIZE,
+                    vx: -Math.cos(ship.angle) * 0.5 + (Math.random() - 0.5) * 0.3,
+                    vy: -Math.sin(ship.angle) * 0.5 + (Math.random() - 0.5) * 0.3,
+                    life: 20,
+                    color: Math.random() > 0.5 ? '#ff6600' : '#ffaa00',
+                    size: 2
+                });
+            }
+        }
+        
+        // Ship glow
+        const shipGradient = ctx.createRadialGradient(0, 0, 0, 0, 0, SHIP_SIZE * 1.5);
+        shipGradient.addColorStop(0, 'rgba(64, 169, 255, 1)');
+        shipGradient.addColorStop(0.5, 'rgba(64, 169, 255, 0.5)');
+        shipGradient.addColorStop(1, 'rgba(64, 169, 255, 0)');
+        ctx.fillStyle = shipGradient;
+        ctx.beginPath();
+        ctx.arc(0, 0, SHIP_SIZE * 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Ship body
+        ctx.beginPath();
+        ctx.moveTo(SHIP_SIZE, 0);
+        ctx.lineTo(-SHIP_SIZE/2, SHIP_SIZE/2);
+        ctx.lineTo(-SHIP_SIZE/2, -SHIP_SIZE/2);
+        ctx.closePath();
+        
+        ctx.fillStyle = '#40a9ff';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Ship core highlight
+        ctx.fillStyle = '#80d0ff';
+        ctx.beginPath();
+        ctx.arc(SHIP_SIZE * 0.3, 0, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+    
+    ctx.restore(); // End screen shake transform
+
+    // Draw Transition Overlay
+    if (gameState === 'transition' || gameState === 'gameover') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        // Main Text
+        ctx.font = 'bold 48px system-ui';
+        ctx.fillStyle = gameState === 'gameover' ? '#ff4040' : '#6be675';
+        ctx.fillText(transitionText, CANVAS_WIDTH/2, CANVAS_HEIGHT/2 - 30);
+        
+        // Sub Text
+        ctx.font = '32px system-ui';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(transitionSubText, CANVAS_WIDTH/2, CANVAS_HEIGHT/2 + 30);
+    }
+    }
+
+
+    // --- Input Handling ---
+
+    // 1. Keyboard
+    const keys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false, ControlLeft: false, ControlRight: false };
+    window.addEventListener('keydown', (e) => {
+        // Level skip: Press 1-9 to jump to that level
+        if (e.code >= 'Digit1' && e.code <= 'Digit9') {
+            const targetLevel = parseInt(e.code.replace('Digit', ''), 10);
+            if (targetLevel >= 1 && targetLevel <= 9) {
+                level = targetLevel;
+                resetLevel();
+                return;
+            }
+        }
+        
+        // Shooting with Control key
+        if (e.code === 'ControlLeft' || e.code === 'ControlRight') {
+            keys[e.code] = true;
+            fireRocket();
+        }
+        
+        // Bomb with B key
+        if (e.code === 'KeyB') {
+            fireBomb();
+        }
+        
+        if (keys.hasOwnProperty(e.code)) keys[e.code] = true;
+        updateInput();
+    });
+    window.addEventListener('keyup', (e) => {
+        if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+        updateInput();
+    });
+
+    // Touch controls for mobile
+    let touchShooting = false;
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        touchShooting = true;
+        fireRocket();
+    });
+    canvas.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        touchShooting = false;
+    });
+    canvas.addEventListener('touchcancel', (e) => {
+        e.preventDefault();
+        touchShooting = false;
+    });
+    
+    // Long press for bomb (hold for 1 second)
+    let bombTouchTimer = null;
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        bombTouchTimer = setTimeout(() => {
+            fireBomb();
+            bombTouchTimer = null;
+        }, 1000);
+    });
+    canvas.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        if (bombTouchTimer) {
+            clearTimeout(bombTouchTimer);
+            bombTouchTimer = null;
+        }
+    });
+    
+    // Prevent scrolling on mobile
+    document.addEventListener('touchmove', (e) => {
+        if (e.target === canvas) {
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    function updateInput() {
+        // Priority: Remote Tilt > Local Tilt > Gamepad > Keyboard
+        if (remoteTiltActive) return;
+        if (localTiltActive) return;
+
+        // Gamepad Input
+        if (gamepadIndex !== null) {
+            const gp = navigator.getGamepads()[gamepadIndex];
+            if (gp) {
+                // Apply deadzone to avoid drift
+                const DEADZONE = 0.1;
+                let axisX = gp.axes[0]; // Left stick horizontal
+                let axisY = gp.axes[1]; // Left stick vertical
+                
+                if (Math.abs(axisX) < DEADZONE) axisX = 0;
+                if (Math.abs(axisY) < DEADZONE) axisY = 0;
+
+                // If gamepad is active (stick moved), use it
+                if (Math.abs(axisX) > 0 || Math.abs(axisY) > 0) {
+                    inputX = axisX;
+                    inputY = axisY;
+                    tiltStatus.textContent = `Controller: x=${axisX.toFixed(2)}, y=${axisY.toFixed(2)}`;
+                    return; // Gamepad stick active, don't check keyboard
+                }
+                // Stick not moved, fall through to keyboard
+            }
+        }
+
+        // Keyboard Fallback (only if gamepad not used)
+        inputX = 0;
+        inputY = 0;
+        if (keys.ArrowRight) inputX += 1;
+        if (keys.ArrowLeft) inputX -= 1;
+        if (keys.ArrowDown) inputY += 1;
+        if (keys.ArrowUp) inputY -= 1;
+    }
+
+    // 2. Remote Tilt (WebSocket)
+    let rtWs = null;
+    let rtPeer = '1';
+
+    function startRemoteTilt() {
+        try { if (rtWs) { rtWs.close(); rtWs = null; } } catch {}
+        
+        const loc = window.location;
+        const wsUrl = `ws://${loc.hostname}:8765`;
+        
+            connStatus.textContent = "Verbinde mit Server...";
+        
+        try {
+            rtWs = new WebSocket(wsUrl);
+            
+            rtWs.onopen = () => {
+                connStatus.textContent = "Signalisierung verbunden";
+                rtWs.send(JSON.stringify({ type: 'hello', role: 'receiver', peer: rtPeer }));
+            };
+            
+            rtWs.onmessage = (ev) => {
+                try {
+                    const data = JSON.parse(ev.data);
+                    if (data.type === 'tilt') {
+                        remoteTiltActive = true;
+                        const nx = Math.max(-1, Math.min(1, data.nx || 0));
+                        const ny = Math.max(-1, Math.min(1, data.ny || 0));
+                        
+                        inputX = nx * REMOTE_TILT_SCALE;
+                        inputY = ny * REMOTE_TILT_SCALE;
+                        
+                        tiltStatus.textContent = `Fernsteuerung: x=${nx.toFixed(2)}, y=${ny.toFixed(2)}`;
+                    }
+                } catch {}
+            };
+            
+            rtWs.onerror = () => {
+                // Silent fail in standalone mode
+                connStatus.textContent = "Server nicht gefunden (Offline-Modus)";
+                remoteTiltActive = false;
+            };
+            
+            rtWs.onclose = () => {
+                if (remoteTiltActive) {
+                     connStatus.textContent = "Verbindung geschlossen";
+                }
+                remoteTiltActive = false;
+            };
+            
+        } catch (e) {
+            connStatus.textContent = "Offline-Modus";
+        }
+    }
+
+
+    // 3. Local Tilt (Device Orientation)
+    function handleLocalOrientation(e) {
+        if (!localTiltActive) return;
+        
+        // Use absolute orientation if available, otherwise relative
+        const beta = e.beta !== null && e.beta !== undefined ? e.beta : 0;   // Pitch (front/back tilt)
+        const gamma = e.gamma !== null && e.gamma !== undefined ? e.gamma : 0; // Roll (left/right tilt)
+
+        // Normalize to -1..1 range
+        // gamma: -90 to 90 degrees (left/right tilt)
+        // beta: -180 to 180 degrees (front/back tilt)
+        const nx = Math.max(-1, Math.min(1, gamma / 45));
+        const ny = Math.max(-1, Math.min(1, beta / 45));
+
+        inputX = nx * LOCAL_TILT_SCALE;
+        inputY = ny * LOCAL_TILT_SCALE;
+
+        tiltStatus.textContent = `Neigung: x=${nx.toFixed(2)}, y=${ny.toFixed(2)} (Auto-Schießen aktiv)`;
+    }
+
+    // Check if device orientation is available
+    function checkOrientationSupport() {
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        const hasOrientation = 'DeviceOrientationEvent' in window;
+        const needsPermission = typeof DeviceOrientationEvent !== 'undefined' && 
+                                typeof DeviceOrientationEvent.requestPermission === 'function';
+        
+        if (!hasOrientation) {
+            tiltStatus.textContent = "Neigungssensor nicht verfügbar";
+            enableTiltBtn.style.display = 'none';
+            return false;
+        }
+        
+        // On mobile devices, show button or auto-enable if possible
+        if (isMobile) {
+            enableTiltBtn.textContent = "Neigung aktivieren";
+            enableTiltBtn.style.display = 'block';
+        } else {
+            // Desktop: hide button (orientation sensors not typically available)
+            enableTiltBtn.style.display = 'none';
+            tiltStatus.textContent = "Tastatur/Controller";
+        }
+        
+        return true;
+    }
+
+    // Enable Local Tilt Button
+    enableTiltBtn.addEventListener('click', async () => {
+        await requestOrientationPermission();
+    });
+
+    async function requestOrientationPermission() {
+        // iOS 13+ requires permission
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+            try {
+                const response = await DeviceOrientationEvent.requestPermission();
+                if (response === 'granted') {
+                    activateLocalTilt();
+                } else {
+                    tiltStatus.textContent = "Berechtigung verweigert";
+                    alert("Berechtigung für Neigungssensor verweigert. Bitte in den Einstellungen erlauben.");
+                }
+            } catch (e) {
+                console.error('Permission request error:', e);
+                tiltStatus.textContent = "Fehler bei Berechtigung";
+                alert("Fehler beim Anfordern der Berechtigung: " + e.message);
+            }
+        } else {
+            // Android/other browsers: try to activate directly
+            activateLocalTilt();
+        }
+    }
+
+    function activateLocalTilt() {
+        // Check if orientation events are actually firing
+        let orientationReceived = false;
+        const testHandler = (e) => {
+            if (e.beta !== null || e.gamma !== null) {
+                orientationReceived = true;
+            }
+        };
+        
+        // Try both relative and absolute orientation
+        window.addEventListener('deviceorientation', testHandler);
+        window.addEventListener('deviceorientationabsolute', testHandler);
+        
+        // Set main handler
+        window.addEventListener('deviceorientation', handleLocalOrientation);
+        window.addEventListener('deviceorientationabsolute', handleLocalOrientation);
+        
+        localTiltActive = true;
+        enableTiltBtn.style.display = 'none';
+        tiltStatus.textContent = "Neigung aktiv - Gerät neigen zum Steuern (Auto-Schießen aktiviert)";
+        
+        // Check after 2 seconds if we're receiving data
+        setTimeout(() => {
+            if (!orientationReceived && localTiltActive) {
+                tiltStatus.textContent = "Warte auf Sensordaten...";
+                console.warn('Device orientation events not received. May need HTTPS or permission.');
+            }
+        }, 2000);
+    }
+
+
+    // Start
+    initGame();
+  </script>
+</body>
+</html>
